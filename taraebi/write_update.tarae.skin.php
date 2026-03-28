@@ -1,0 +1,256 @@
+<?php
+if (!defined('_GNUBOARD_')) {
+    exit;
+}
+
+// 취소 요청 시 리스트로 이동
+if (isset($_POST['cancel']) && $_POST['cancel']) {
+    $cancel_bo_table = isset($_POST['bo_table']) ? preg_replace('/[^a-z0-9_]/i', '', $_POST['bo_table']) : '';
+    $cancel_parent = isset($_POST['wr_parent']) ? (int)$_POST['wr_parent'] : 0;
+    if (!$cancel_bo_table && isset($board['bo_table'])) {
+        $cancel_bo_table = $board['bo_table'];
+    }
+    $cancel_url = G5_BBS_URL . '/board.php?bo_table=' . urlencode($cancel_bo_table);
+    if ($cancel_parent > 0) {
+        $cancel_url .= '&wr_id=' . $cancel_parent;
+    }
+    goto_url($cancel_url);
+}
+
+// 게시판 쓰기 권한 체크
+global $board, $member, $is_admin, $write;
+if ($w == 'u') {
+    // 글수정 권한 체크
+    if ($member['mb_id'] && $write['mb_id'] === $member['mb_id']) {
+        // 자신의 글은 통과
+    } else if ($is_admin) {
+        // 관리자는 통과
+    } else if ($member['mb_level'] < $board['bo_write_level']) {
+        if ($member['mb_id']) {
+            alert('글을 수정할 권한이 없습니다.');
+        } else {
+            alert('글을 수정할 권한이 없습니다.\\n\\n회원이시라면 로그인 후 이용해 보십시오.');
+        }
+    } else {
+        // 권한은 있지만 자신의 글이 아니면 차단
+        alert('자신이 작성한 글만 수정할 수 있습니다.');
+    }
+}
+
+// tarae 전용 필드 업데이트
+$tarae_subject = isset($_POST['tarae_subject']) ? trim($_POST['tarae_subject']) : '';
+
+// tarae 전용 컬럼 존재 확인 (없으면 추가)
+$tarae_columns = array();
+$max_image_count = isset($board['bo_upload_count']) ? (int)$board['bo_upload_count'] : 0;
+if ($max_image_count > 16) {
+    $max_image_count = 16;
+}
+if ($max_image_count < 0) {
+    $max_image_count = 0;
+}
+$tarae_image_start_index = 11;
+for ($i = 1; $i <= $max_image_count; $i++) {
+    $col = 'wr_' . ($tarae_image_start_index - 1 + $i);
+    $tarae_columns[$col] = "VARCHAR(255) NOT NULL DEFAULT ''";
+}
+foreach ($tarae_columns as $col => $definition) {
+    $col_exists = sql_fetch("SHOW COLUMNS FROM {$write_table} LIKE '{$col}'");
+    if (!$col_exists) {
+        sql_query("ALTER TABLE {$write_table} ADD COLUMN `{$col}` {$definition}", false);
+    }
+}
+
+// wr_subject 업데이트 (tarae_subject에서 가져옴)
+if ($tarae_subject !== '') {
+    $tarae_subject = clean_xss_tags($tarae_subject, 1, 1);
+    $tarae_subject = substr($tarae_subject, 0, 255);
+    sql_query("UPDATE {$write_table} SET wr_subject = '".sql_real_escape_string($tarae_subject)."' WHERE wr_id = '{$wr_id}'", false);
+}
+
+// Youtube URL 저장 (wr_6)
+$youtube_url = isset($_POST['wr_6']) ? trim($_POST['wr_6']) : '';
+$youtube_url = clean_xss_tags($youtube_url);
+$youtube_url = substr($youtube_url, 0, 255);
+sql_query("UPDATE {$write_table} SET wr_6 = '".sql_real_escape_string($youtube_url)."' WHERE wr_id = '{$wr_id}'", false);
+
+// tarae 전용 이미지 저장 처리 (wr_11 ~ wr_26)
+$tarae_image_urls = array();
+$requested_count = isset($_POST['tarae_image_count']) ? (int)$_POST['tarae_image_count'] : $max_image_count;
+if ($requested_count < 0) {
+    $requested_count = 0;
+}
+if ($requested_count > $max_image_count) {
+    $requested_count = $max_image_count;
+}
+// multi 파일 입력 (write.tarae에서 붙여넣기/첨부용)
+$multi_upload_urls = array();
+if (isset($_FILES['tarae_attach_files']) && is_array($_FILES['tarae_attach_files']['name'])) {
+    $multi_count = count($_FILES['tarae_attach_files']['name']);
+    for ($i = 0; $i < $multi_count; $i++) {
+        if (!isset($_FILES['tarae_attach_files']['error'][$i]) || $_FILES['tarae_attach_files']['error'][$i] != 0) {
+            $multi_upload_urls[$i] = '';
+            continue;
+        }
+        $tmp_file = $_FILES['tarae_attach_files']['tmp_name'][$i];
+        $filename = $_FILES['tarae_attach_files']['name'][$i];
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        $allowed_ext = array('jpg', 'jpeg', 'png', 'gif', 'webp');
+        if (!in_array($ext, $allowed_ext)) {
+            $multi_upload_urls[$i] = '';
+            continue;
+        }
+        $upload_dir = G5_DATA_PATH . '/file/' . $bo_table;
+        $upload_url = G5_DATA_URL  . '/file/' . $bo_table;
+        if (!is_dir($upload_dir)) {
+            @mkdir($upload_dir, G5_DIR_PERMISSION, true);
+            @chmod($upload_dir, G5_DIR_PERMISSION);
+        }
+        $new_filename = 'tarae_multi_' . md5(uniqid(time(), true) . '_' . $i) . '.' . $ext;
+        $dest_path = $upload_dir . '/' . $new_filename;
+        if (move_uploaded_file($tmp_file, $dest_path)) {
+            @chmod($dest_path, G5_FILE_PERMISSION);
+            if (function_exists('resize_image')) {
+                resize_image($dest_path, 1200, 1200);
+            }
+            $multi_upload_urls[$i] = $upload_url . '/' . $new_filename;
+        } else {
+            $multi_upload_urls[$i] = '';
+        }
+    }
+}
+for ($i = 1; $i <= $max_image_count; $i++) {
+    $wr_field = 'wr_' . ($tarae_image_start_index - 1 + $i); // wr_11 ~ wr_26
+    $uploaded_file_url = '';
+    $force_delete = ($i > $requested_count);
+    
+    // 개수 축소 시 뒤에서부터 자동 삭제
+    if ($force_delete) {
+        if ($w == 'u') {
+            $old_write = sql_fetch("SELECT {$wr_field} FROM {$write_table} WHERE wr_id = '{$wr_id}'");
+            if ($old_write && !empty($old_write[$wr_field])) {
+                $old_url = $old_write[$wr_field];
+                if (strpos($old_url, G5_DATA_URL.'/file/') === 0) {
+                    $old_path = str_replace(G5_DATA_URL, G5_DATA_PATH, $old_url);
+                    if (file_exists($old_path)) {
+                        @unlink($old_path);
+                    }
+                }
+            }
+        }
+        $tarae_image_urls[$wr_field] = '';
+        continue;
+    }
+
+    // 파일 업로드 처리
+    $file_key = 'tarae_image_file_' . $i;
+    if (isset($_FILES[$file_key]) && $_FILES[$file_key]['error'] == 0) {
+        $tmp_file = $_FILES[$file_key]['tmp_name'];
+        $filename = $_FILES[$file_key]['name'];
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        $allowed_ext = array('jpg', 'jpeg', 'png', 'gif', 'webp');
+        
+        if (in_array($ext, $allowed_ext)) {
+            $upload_dir = G5_DATA_PATH . '/file/' . $bo_table;
+            $upload_url = G5_DATA_URL  . '/file/' . $bo_table;
+            
+            if (!is_dir($upload_dir)) {
+                @mkdir($upload_dir, G5_DIR_PERMISSION, true);
+                @chmod($upload_dir, G5_DIR_PERMISSION);
+            }
+            
+            $new_filename = 'tarae_' . md5(uniqid(time(), true) . '_' . $i) . '.' . $ext;
+            $dest_path = $upload_dir . '/' . $new_filename;
+            
+            if (move_uploaded_file($tmp_file, $dest_path)) {
+                @chmod($dest_path, G5_FILE_PERMISSION);
+                if (function_exists('resize_image')) {
+                    resize_image($dest_path, 1200, 1200);
+                }
+                $uploaded_file_url = $upload_url . '/' . $new_filename;
+            }
+        }
+    }
+    
+    // 기존 이미지 삭제 처리
+    $delete_existing_image = false;
+    if ($w == 'u' && isset($_POST[$wr_field.'_del']) && $_POST[$wr_field.'_del'] == '1') {
+        $delete_existing_image = true;
+        // 기존 이미지 파일 삭제
+        $old_write = sql_fetch("SELECT {$wr_field} FROM {$write_table} WHERE wr_id = '{$wr_id}'");
+        if ($old_write && !empty($old_write[$wr_field])) {
+            $old_url = $old_write[$wr_field];
+            if (strpos($old_url, G5_DATA_URL.'/file/') === 0) {
+                $old_path = str_replace(G5_DATA_URL, G5_DATA_PATH, $old_url);
+                if (file_exists($old_path)) {
+                    @unlink($old_path);
+                }
+            }
+        }
+    }
+    
+    // 최종 이미지 URL 결정 (업로드 > URL 입력 > 기존 유지 > 삭제)
+    $final_image_url = '';
+    if ($uploaded_file_url) {
+        $final_image_url = $uploaded_file_url;
+    } elseif (isset($_POST[$wr_field]) && trim($_POST[$wr_field]) !== '') {
+        $input_url = clean_xss_tags(trim($_POST[$wr_field]));
+        if (strpos($input_url, 'file:') === 0) {
+            $file_idx = (int)substr($input_url, 5);
+            if (isset($multi_upload_urls[$file_idx]) && $multi_upload_urls[$file_idx]) {
+                $final_image_url = $multi_upload_urls[$file_idx];
+            }
+        } elseif (filter_var($input_url, FILTER_VALIDATE_URL) || preg_match('/^\/[^\/]/', $input_url) || strpos($input_url, G5_DATA_URL) === 0) {
+            $final_image_url = $input_url;
+        }
+    } elseif ($w == 'u' && !$delete_existing_image) {
+        // 기존 이미지 유지 (업데이트하지 않음)
+        continue;
+    }
+    
+    $tarae_image_urls[$wr_field] = $final_image_url;
+}
+
+// wr_11 ~ wr_26 필드 업데이트
+$update_fields = array(
+    "wr_4 = 'tarae'"
+);
+
+foreach ($tarae_image_urls as $field => $url) {
+    $update_fields[] = "{$field} = '".sql_real_escape_string($url)."'";
+}
+
+if (!empty($update_fields)) {
+    $update_sql = "UPDATE {$write_table} SET ".implode(', ', $update_fields)." WHERE wr_id = '{$wr_id}'";
+    sql_query($update_sql, false);
+}
+
+// 새 메모 작성 시 부모 글 ID를 유지 (wr_parent가 자기 자신으로 덮이는 문제 보정)
+if ($w == '' && isset($_POST['wr_parent']) && (int)$_POST['wr_parent'] > 0) {
+    $parent_wr_id = (int)$_POST['wr_parent'];
+    sql_query("UPDATE {$write_table} SET wr_parent = '{$parent_wr_id}' WHERE wr_id = '{$wr_id}'", false);
+}
+
+// 새 댓글 작성 시 제목 자동 설정 (부모글 제목 + 작성시간 기준 순번)
+if ($w == '' && isset($_POST['wr_parent']) && (int)$_POST['wr_parent'] > 0) {
+    $parent_wr_id = (int)$_POST['wr_parent'];
+    $parent_row = sql_fetch("SELECT wr_subject FROM {$write_table} WHERE wr_id = '{$parent_wr_id}'");
+    $parent_subject = $parent_row && isset($parent_row['wr_subject']) ? $parent_row['wr_subject'] : '';
+    $parent_subject = clean_xss_tags($parent_subject, 1, 1);
+
+    $current_row = sql_fetch("SELECT wr_datetime FROM {$write_table} WHERE wr_id = '{$wr_id}'");
+    $current_datetime = $current_row && isset($current_row['wr_datetime']) ? $current_row['wr_datetime'] : '';
+    if ($current_datetime) {
+        $seq_row = sql_fetch("SELECT COUNT(*) AS cnt FROM {$write_table} WHERE wr_parent = '{$parent_wr_id}' AND wr_id != wr_parent AND wr_4 = 'tarae' AND (wr_datetime < '{$current_datetime}' OR (wr_datetime = '{$current_datetime}' AND wr_id <= '{$wr_id}'))");
+    } else {
+        $seq_row = sql_fetch("SELECT COUNT(*) AS cnt FROM {$write_table} WHERE wr_parent = '{$parent_wr_id}' AND wr_id != wr_parent AND wr_4 = 'tarae'");
+    }
+    $seq = $seq_row && isset($seq_row['cnt']) ? (int)$seq_row['cnt'] : 0;
+    if ($seq < 1) {
+        $seq = 1;
+    }
+
+    $reply_subject = $parent_subject . sprintf('%04d', $seq);
+    $reply_subject = substr($reply_subject, 0, 255);
+    sql_query("UPDATE {$write_table} SET wr_subject = '".sql_real_escape_string($reply_subject)."' WHERE wr_id = '{$wr_id}'", false);
+}
